@@ -71,6 +71,9 @@
   .btn.ghost{background:var(--card);color:var(--txt);border:1px solid var(--line)}
   .btn.done{background:var(--card);color:var(--accent);border:1px solid rgba(52,211,153,.4)}
   .btn.sm{padding:11px;font-size:14px;border-radius:12px}
+  .seg{display:inline-flex;background:var(--card2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .seg button{background:none;border:0;color:var(--muted);padding:6px 13px;font-size:13px;font-weight:700}
+  .seg button.on{background:var(--accent);color:#04110b}
   .banner{background:linear-gradient(135deg,rgba(245,158,11,.14),rgba(245,158,11,.05));
     border:1px solid rgba(245,158,11,.3);border-radius:14px;padding:12px 14px;margin-bottom:12px}
   .banner b{color:var(--warn)}
@@ -181,12 +184,29 @@ let data = load();
 let cur = todayStr();   // selected date on Today tab
 let tab = 'today';
 let progSel = null;
+let progUnit = null;    // display unit on Progress tab
 
 function load(){
-  try{const d=JSON.parse(localStorage.getItem(KEY));if(d&&d.sessions)return d;}catch(e){}
-  return {meta:{startDate:null},sessions:{}};
+  let d=null;
+  try{d=JSON.parse(localStorage.getItem(KEY));}catch(e){}
+  if(!d||!d.sessions)d={meta:{startDate:null},sessions:{}};
+  if(!d.settings)d.settings={unit:'kg'};
+  return d;
 }
 function save(){localStorage.setItem(KEY,JSON.stringify(data))}
+
+/* ---------- Units ---------- */
+const LB=2.20462262;
+function unit(){return data.settings.unit;}            // active input unit
+function toKg(w,u){return (u==='lb')?(+w)/LB:+w;}
+function fromKg(kg,u){return (u==='lb')?kg*LB:kg;}
+function rnd(x){return Math.round(x*10)/10;}
+function fmtN(x){return String(rnd(x));}
+function segUnit(active,fn){return `<div class="seg">
+  <button class="${active==='kg'?'on':''}" onclick="${fn}('kg')">kg</button>
+  <button class="${active==='lb'?'on':''}" onclick="${fn}('lb')">lb</button></div>`;}
+function setUnit(u){data.settings.unit=u;save();render();}
+function setProgUnit(u){progUnit=u;render();}
 
 /* ---------- Date helpers (local) ---------- */
 function todayStr(){return fmt(new Date())}
@@ -209,11 +229,14 @@ function lastSets(exId,beforeDate){
   for(const d of dates){const st=data.sessions[d].sets[exId];if(st&&st.some(v=>v&&(v.w||v.r||v.t)))return{date:d,sets:st};}
   return null;
 }
-function bestVal(ex,sets){ // returns numeric progression value for a session
+function bestVal(ex,sets){ // canonical progression value (load → kg)
   if(!sets)return null;
   let v=null;
   sets.forEach(s=>{if(!s)return;
-    let x = ex.m==='time'? s.t : ex.m==='reps'? s.r : s.w;
+    let x;
+    if(ex.m==='time') x=s.t;
+    else if(ex.m==='reps') x=s.r;
+    else x=(s.w==null||s.w===''||isNaN(+s.w))?null:toKg(s.w,s.u||'kg');
     if(x!=null&&x!==''&&!isNaN(x)) v=Math.max(v??-1e9, +x);
   });
   return v;
@@ -297,8 +320,8 @@ function renderToday(){
   // lift day
   const s=getSession(cur);
   h+=`<div class="row between" style="margin-bottom:10px">
-      <div><h2 class="title" style="margin:0">${p.name}</h2></div>
-      <span class="focus ${p.focus==='Hypertrophy'?'hyp':''}">${p.focus}</span></div>`;
+      <h2 class="title" style="margin:0">${p.name}</h2>
+      <div class="row" style="gap:8px">${segUnit(unit(),'setUnit')}<span class="focus ${p.focus==='Hypertrophy'?'hyp':''}">${p.focus}</span></div></div>`;
   h+=`<div class="card">`;
   p.ex.forEach(ex=>{
     const sets = (s&&s.sets[ex.id]) || Array.from({length:ex.sets},()=>({}));
@@ -319,12 +342,14 @@ function renderToday(){
           <div class="field ${v.t!=null&&v.t!==''?'filled':''}"><input inputmode="numeric" placeholder="${ph}" value="${v.t??''}"
             oninput="setVal('${ex.id}',${i},'t',this.value)"><span class="u">sec</span></div></div>`;
       } else {
-        const phW = lastW&&lastW.w!=null&&lastW.w!==''?lastW.w:'';
+        const lu=unit();
+        const phW = (lastW&&lastW.w!=null&&lastW.w!=='') ? fmtN(fromKg(toKg(lastW.w,lastW.u||'kg'),lu)) : '';
         const phR = ex.target;
         const wfilled=v.w!=null&&v.w!=='', rfilled=v.r!=null&&v.r!=='';
+        const setU = wfilled ? (v.u||'kg') : lu;
         h+=`<div class="setrow"><div class="setno">${i+1}</div>
-          <div class="field ${wfilled?'filled':''}"><input inputmode="decimal" placeholder="${phW===''?'kg':phW}" value="${v.w??''}"
-            oninput="setVal('${ex.id}',${i},'w',this.value)"><span class="u">kg</span></div>
+          <div class="field ${wfilled?'filled':''}"><input inputmode="decimal" placeholder="${phW===''?lu:phW}" value="${v.w??''}"
+            oninput="setVal('${ex.id}',${i},'w',this.value)"><span class="u">${setU}</span></div>
           <div class="field ${rfilled?'filled':''}"><input inputmode="numeric" placeholder="${phR}" value="${v.r??''}"
             oninput="setVal('${ex.id}',${i},'r',this.value)"><span class="u">reps</span></div></div>`;
       }
@@ -340,7 +365,10 @@ function setLabel(ex,sets){
   const b=bestVal(ex,sets);if(b==null)return '—';
   return prLabel(ex,b);
 }
-function prLabel(ex,v){return ex.m==='time'? v+'s' : ex.m==='reps'? v+' reps' : v+' kg';}
+function prLabel(ex,v,u){u=u||unit();
+  if(ex.m==='time')return v+'s';
+  if(ex.m==='reps')return v+' reps';
+  return fmtN(fromKg(v,u))+' '+u;}
 function allTimeBest(ex){
   let best=null;
   Object.keys(data.sessions).forEach(d=>{const st=data.sessions[d].sets[ex.id];const b=bestVal(ex,st);if(b!=null)best=Math.max(best??-1e9,b)});
@@ -354,7 +382,9 @@ function setVal(exId,i,k,val){
   const s=ensureSession(cur);
   if(!s.sets[exId])s.sets[exId]=Array.from({length:(prog(cur).ex.find(e=>e.id===exId).sets)},()=>({}));
   if(!s.sets[exId][i])s.sets[exId][i]={};
-  s.sets[exId][i][k]= val===''?'':(isNaN(+val)?val:+val);
+  const cell=s.sets[exId][i];
+  cell[k]= val===''?'':(isNaN(+val)?val:+val);
+  if(k==='w') cell.u=unit();   // remember the unit this weight was entered in
   save();
   document.getElementById('streakHdr').textContent=currentStreak();
 }
@@ -421,22 +451,28 @@ function renderProgress(){
   if(!ids.length){return done(`<h2 class="title">Progress</h2><div class="emptyst">Log a few workouts and your strength curves will show up here. 📈</div>`)}
   if(!progSel||!ids.includes(progSel))progSel=ids[0];
   const m=exName[progSel].m;
-  const pts=[];
-  Object.keys(data.sessions).sort().forEach(d=>{const b=bestVal({m},data.sessions[d].sets[progSel]);if(b!=null)pts.push({date:d,v:b})});
+  if(!progUnit)progUnit=data.settings.unit;
+  const isLoad=m==='load';
+  const ptsK=[]; // canonical values (load → kg)
+  Object.keys(data.sessions).sort().forEach(d=>{const b=bestVal({m},data.sessions[d].sets[progSel]);if(b!=null)ptsK.push({date:d,k:b})});
+  const pts=ptsK.map(p=>({date:p.date,v:isLoad?rnd(fromKg(p.k,progUnit)):p.k}));
+  const ul=m==='time'?'sec':m==='reps'?'reps':progUnit;
   let h=`<h2 class="title">Progress</h2><div class="sub">Best set per session over time.</div>
     <select onchange="progSel=this.value;render()">${ids.map(id=>`<option value="${id}" ${id===progSel?'selected':''}>${exName[id].name}</option>`).join('')}</select>`;
+  if(isLoad)h+=`<div class="row between" style="margin-top:10px"><span class="muted small">Display unit</span>${segUnit(progUnit,'setProgUnit')}</div>`;
   const first=pts[0].v,lastp=pts[pts.length-1].v,best=Math.max(...pts.map(p=>p.v));
-  const unit=m==='time'?'sec':m==='reps'?'reps':'kg';
-  const delta=lastp-first;
+  const delta=rnd(lastp-first);
   h+=`<div class="statgrid" style="margin-top:12px">
-    <div class="stat"><div class="v">${lastp}<span style="font-size:13px;color:var(--muted)"> ${unit}</span></div><div class="l">Latest</div></div>
-    <div class="stat"><div class="v c">${best}<span style="font-size:13px;color:var(--muted)"> ${unit}</span></div><div class="l">Best</div></div>
-    <div class="stat"><div class="v ${delta>=0?'a':''}" style="${delta<0?'color:#ef4444':''}">${delta>=0?'+':''}${delta}</div><div class="l">vs start</div></div>
+    <div class="stat"><div class="v">${fmtN(lastp)}<span style="font-size:13px;color:var(--muted)"> ${ul}</span></div><div class="l">Latest</div></div>
+    <div class="stat"><div class="v c">${fmtN(best)}<span style="font-size:13px;color:var(--muted)"> ${ul}</span></div><div class="l">Best</div></div>
+    <div class="stat"><div class="v ${delta>=0?'a':''}" style="${delta<0?'color:#ef4444':''}">${delta>=0?'+':''}${fmtN(delta)}</div><div class="l">vs start</div></div>
   </div>`;
   h+=`<div class="card"><canvas id="chart" height="200"></canvas></div>`;
-  h+=`<div class="card">${pts.slice().reverse().map(p=>`<div class="histrow"><span class="muted">${pretty(p.date)}</span><b>${p.v} ${unit}</b></div>`).join('')}</div>`;
+  h+=`<div class="card">${ptsK.slice().reverse().map(p=>{
+    const right=isLoad?`${fmtN(p.k)} kg · ${fmtN(fromKg(p.k,'lb'))} lb`:`${p.k} ${ul}`;
+    return `<div class="histrow"><span class="muted">${pretty(p.date)}</span><b>${right}</b></div>`;}).join('')}</div>`;
   done(h);
-  drawChart(pts,unit);
+  drawChart(pts,ul);
 }
 function drawChart(pts,unit){
   const c=document.getElementById('chart');if(!c)return;
