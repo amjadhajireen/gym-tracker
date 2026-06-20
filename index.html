@@ -74,6 +74,7 @@
   .seg{display:inline-flex;background:var(--card2);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .seg button{background:none;border:0;color:var(--muted);padding:6px 13px;font-size:13px;font-weight:700}
   .seg button.on{background:var(--accent);color:#04110b}
+  .seg.sm button{padding:4px 9px;font-size:12px}
   .banner{background:linear-gradient(135deg,rgba(245,158,11,.14),rgba(245,158,11,.05));
     border:1px solid rgba(245,158,11,.3);border-radius:14px;padding:12px 14px;margin-bottom:12px}
   .banner b{color:var(--warn)}
@@ -191,6 +192,7 @@ function load(){
   try{d=JSON.parse(localStorage.getItem(KEY));}catch(e){}
   if(!d||!d.sessions)d={meta:{startDate:null},sessions:{}};
   if(!d.settings)d.settings={unit:'kg'};
+  if(!d.settings.exUnit)d.settings.exUnit={};   // per-exercise unit preference
   return d;
 }
 function save(){localStorage.setItem(KEY,JSON.stringify(data))}
@@ -205,8 +207,12 @@ function fmtN(x){return String(rnd(x));}
 function segUnit(active,fn){return `<div class="seg">
   <button class="${active==='kg'?'on':''}" onclick="${fn}('kg')">kg</button>
   <button class="${active==='lb'?'on':''}" onclick="${fn}('lb')">lb</button></div>`;}
-function setUnit(u){data.settings.unit=u;save();render();}
 function setProgUnit(u){progUnit=u;render();}
+function exUnit(id){return data.settings.exUnit[id]||data.settings.unit||'kg';}  // unit for a given exercise
+function setExUnit(id,u){data.settings.exUnit[id]=u;save();render();}
+function segUnitEx(id,active){return `<div class="seg sm">
+  <button class="${active==='kg'?'on':''}" onclick="setExUnit('${id}','kg')">kg</button>
+  <button class="${active==='lb'?'on':''}" onclick="setExUnit('${id}','lb')">lb</button></div>`;}
 
 /* ---------- Date helpers (local) ---------- */
 function todayStr(){return fmt(new Date())}
@@ -321,17 +327,20 @@ function renderToday(){
   const s=getSession(cur);
   h+=`<div class="row between" style="margin-bottom:10px">
       <h2 class="title" style="margin:0">${p.name}</h2>
-      <div class="row" style="gap:8px">${segUnit(unit(),'setUnit')}<span class="focus ${p.focus==='Hypertrophy'?'hyp':''}">${p.focus}</span></div></div>`;
+      <span class="focus ${p.focus==='Hypertrophy'?'hyp':''}">${p.focus}</span></div>`;
   h+=`<div class="card">`;
   p.ex.forEach(ex=>{
     const sets = (s&&s.sets[ex.id]) || Array.from({length:ex.sets},()=>({}));
     const ls=lastSets(ex.id,cur);
     const pr=allTimeBest(ex);
+    const eu=exUnit(ex.id);
     h+=`<div class="ex"><div class="exhead">
         <div><div class="exname">${ex.name}</div>
-          ${ls?`<div class="last">Last: ${setLabel(ex,ls.sets)}</div>`:''}</div>
-        <div style="text-align:right"><div class="scheme">${ex.sets}×${ex.m==='time'?ex.target+'s':ex.target}${ex.note||''}</div>
-          ${pr!=null?`<div class="pr">PR ${prLabel(ex,pr)}</div>`:''}</div>
+          ${ls?`<div class="last">Last: ${setLabel(ex,ls.sets,eu)}</div>`:''}</div>
+        <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:5px">
+          <div class="scheme">${ex.sets}×${ex.m==='time'?ex.target+'s':ex.target}${ex.note||''}</div>
+          ${ex.m!=='time'?segUnitEx(ex.id,eu):''}
+          ${pr!=null?`<div class="pr">PR ${prLabel(ex,pr,eu)}</div>`:''}</div>
       </div><div class="sets">`;
     for(let i=0;i<ex.sets;i++){
       const v=sets[i]||{};
@@ -342,14 +351,14 @@ function renderToday(){
           <div class="field ${v.t!=null&&v.t!==''?'filled':''}"><input inputmode="numeric" placeholder="${ph}" value="${v.t??''}"
             oninput="setVal('${ex.id}',${i},'t',this.value)"><span class="u">sec</span></div></div>`;
       } else {
-        const lu=unit();
+        const lu=eu;
+        const wfilled=v.w!=null&&v.w!=='', rfilled=v.r!=null&&v.r!=='';
+        const dispW = !wfilled ? '' : ((v.u||'kg')===lu ? v.w : fmtN(fromKg(toKg(v.w,v.u||'kg'),lu)));
         const phW = (lastW&&lastW.w!=null&&lastW.w!=='') ? fmtN(fromKg(toKg(lastW.w,lastW.u||'kg'),lu)) : '';
         const phR = ex.target;
-        const wfilled=v.w!=null&&v.w!=='', rfilled=v.r!=null&&v.r!=='';
-        const setU = wfilled ? (v.u||'kg') : lu;
         h+=`<div class="setrow"><div class="setno">${i+1}</div>
-          <div class="field ${wfilled?'filled':''}"><input inputmode="decimal" placeholder="${phW===''?lu:phW}" value="${v.w??''}"
-            oninput="setVal('${ex.id}',${i},'w',this.value)"><span class="u">${setU}</span></div>
+          <div class="field ${wfilled?'filled':''}"><input inputmode="decimal" placeholder="${phW===''?lu:phW}" value="${dispW}"
+            oninput="setVal('${ex.id}',${i},'w',this.value)"><span class="u">${lu}</span></div>
           <div class="field ${rfilled?'filled':''}"><input inputmode="numeric" placeholder="${phR}" value="${v.r??''}"
             oninput="setVal('${ex.id}',${i},'r',this.value)"><span class="u">reps</span></div></div>`;
       }
@@ -361,9 +370,9 @@ function renderToday(){
   h+=`<button class="btn ${dn?'done':''}" onclick="toggleComplete()">${dn?'✓ Workout logged — tap to undo':'Complete workout 🔥'}</button>`;
   done(h);
 }
-function setLabel(ex,sets){
+function setLabel(ex,sets,u){
   const b=bestVal(ex,sets);if(b==null)return '—';
-  return prLabel(ex,b);
+  return prLabel(ex,b,u);
 }
 function prLabel(ex,v,u){u=u||unit();
   if(ex.m==='time')return v+'s';
@@ -384,7 +393,7 @@ function setVal(exId,i,k,val){
   if(!s.sets[exId][i])s.sets[exId][i]={};
   const cell=s.sets[exId][i];
   cell[k]= val===''?'':(isNaN(+val)?val:+val);
-  if(k==='w') cell.u=unit();   // remember the unit this weight was entered in
+  if(k==='w') cell.u=exUnit(exId);   // tag weight with this exercise's chosen unit
   save();
   document.getElementById('streakHdr').textContent=currentStreak();
 }
