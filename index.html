@@ -178,6 +178,9 @@ const PROGRAM = {
 };
 const exName = {};
 Object.values(PROGRAM).forEach(d=>(d.ex||[]).forEach(e=>{exName[e.id]=exName[e.id]||{name:e.name,m:e.m}}));
+const PROG_BY_ID = {};
+const WEEKDAY_OF_ID = {};
+Object.keys(PROGRAM).forEach(k=>{PROG_BY_ID[PROGRAM[k].id]=PROGRAM[k];WEEKDAY_OF_ID[PROGRAM[k].id]=+k});
 
 /* ---------- State ---------- */
 const KEY='gymtracker.v1';
@@ -193,6 +196,8 @@ function load(){
   if(!d||!d.sessions)d={meta:{startDate:null},sessions:{}};
   if(!d.settings)d.settings={unit:'kg'};
   if(!d.settings.exUnit)d.settings.exUnit={};   // per-exercise unit preference
+  if(!d.overrides)d.overrides={};               // per-date workout swap: {date: dayId}
+  if(!d.shifts)d.shifts=[];                      // schedule shifts: [{from, days}] append-only
   return d;
 }
 function save(){localStorage.setItem(KEY,JSON.stringify(data))}
@@ -220,7 +225,30 @@ function fmt(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'
 function parse(s){const[a,b,c]=s.split('-').map(Number);return new Date(a,b-1,c)}
 function addDays(s,n){const d=parse(s);d.setDate(d.getDate()+n);return fmt(d)}
 function dow(s){return parse(s).getDay()}
-function prog(s){return PROGRAM[dow(s)]}
+function defaultProg(s){return PROGRAM[dow(s)]}              // pure calendar weekday
+function shiftFor(s){let n=0;if(data.shifts)for(const seg of data.shifts){if(seg.from<=s)n=seg.days}return n}
+function prog(s){
+  const o=data.overrides&&data.overrides[s];
+  if(o&&PROG_BY_ID[o])return PROG_BY_ID[o];                  // 1. explicit per-day swap wins
+  return PROGRAM[dow(addDays(s,-shiftFor(s)))];              // 2. shifted weekday, else default (shift 0)
+}
+function isOverridden(s){const o=data.overrides&&data.overrides[s];return !!(o&&o!==defaultProg(s).id)}
+function shortDow(s){return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dow(s)]}
+function setOverride(s,id){
+  if(!data.overrides)data.overrides={};
+  if(!id||id===defaultProg(s).id)delete data.overrides[s];
+  else data.overrides[s]=id;
+  save();render();
+}
+function setShift(s,id){                                      // re-anchor plan from date s forward
+  const targetWd=id?WEEKDAY_OF_ID[id]:dow(s);                // '' => realign to calendar (shift 0)
+  const n=(((dow(s)-targetWd)%7)+7)%7;
+  if(!data.shifts)data.shifts=[];
+  data.shifts=data.shifts.filter(seg=>seg.from!==s);         // replace any segment already starting today
+  data.shifts.push({from:s,days:n});
+  if(data.overrides)delete data.overrides[s];                // shift now governs this day
+  save();render();
+}
 function isScheduled(s){return prog(s).type!=='rest'}
 function pretty(s){const d=parse(s);return d.toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'})}
 
@@ -306,6 +334,7 @@ function renderToday(){
     <button class="navbtn" onclick="shift(1)" ${cur>=todayStr()?'disabled style=\"opacity:.3\"':''}>›</button>
   </div>`;
   h+=deloadBanner();
+  h+=swapHTML();
 
   if(p.type==='rest'){
     h+=`<div class="card center"><div style="font-size:34px">🛌</div>
@@ -387,6 +416,34 @@ function done(h){view.innerHTML=h}
 
 /* input handlers */
 function shift(n){const nd=addDays(cur,n);if(nd>todayStr())return;cur=nd;render()}
+function swapHTML(){
+  const eff=prog(cur), cal=defaultProg(cur), ov=isOverridden(cur);
+  const shifted=!ov && eff.id!==cal.id;
+  const tag=t=>t==='rest'?'Rest':t==='activity'?'Recovery':'';
+  let opts=`<option value="">Calendar default · ${shortDow(cur)} ${cal.name}</option>`;
+  const seen=new Set();
+  [6,0,1,2,3,4,5].forEach(k=>{const p=PROGRAM[k];if(seen.has(p.id))return;seen.add(p.id);
+    const lbl=p.name+(p.focus?' · '+p.focus:(tag(p.type)?' · '+tag(p.type):''));
+    const sel=(ov||shifted)&&eff.id===p.id?'selected':'';
+    opts+=`<option value="${p.id}" ${sel}>${lbl}</option>`;});
+  const note=ov?'↪ Today only':shifted?'↪ Shifted':'Workout';
+  return `<div class="row between" style="margin:-2px 0 12px;gap:10px">
+    <span class="muted small" style="white-space:nowrap">${note}</span>
+    <div style="flex:1;max-width:230px"><select onchange="onSwap(this.value)">${opts}</select></div>
+  </div>`;
+}
+function onSwap(id){
+  const eff=prog(cur).id, target=id||defaultProg(cur).id;
+  if(target===eff){render();return;}
+  const s=getSession(cur);
+  const hasData=s&&Object.values(s.sets||{}).some(a=>a&&a.some(v=>v&&(v.w||v.r||v.t)));
+  if(hasData&&!confirm('This day already has sets logged for '+prog(cur).name+'. Switching hides that data (it stays in your backup). Continue?')){render();return;}
+  if(cur===todayStr()&&confirm('Shift the rest of your plan forward to match?\n\nOK — slide every upcoming day too\nCancel — change only today')){
+    setShift(cur,id);
+  }else{
+    setOverride(cur,id);
+  }
+}
 function setVal(exId,i,k,val){
   const s=ensureSession(cur);
   if(!s.sets[exId])s.sets[exId]=Array.from({length:(prog(cur).ex.find(e=>e.id===exId).sets)},()=>({}));
@@ -535,10 +592,10 @@ function exportData(){
 }
 function importData(inp){
   const f=inp.files[0];if(!f)return;const r=new FileReader();
-  r.onload=()=>{try{const d=JSON.parse(r.result);if(d.sessions){data=d;save();render();alert('Backup restored ✓')}else alert('Not a valid backup')}catch(e){alert('Could not read file')}};
+  r.onload=()=>{try{const d=JSON.parse(r.result);if(d.sessions){if(!d.overrides)d.overrides={};if(!d.shifts)d.shifts=[];data=d;save();render();alert('Backup restored ✓')}else alert('Not a valid backup')}catch(e){alert('Could not read file')}};
   r.readAsText(f);
 }
-function resetData(){if(confirm('Erase all logged workouts and streaks? This cannot be undone.')){data={meta:{startDate:null},sessions:{}};save();cur=todayStr();render()}}
+function resetData(){if(confirm('Erase all logged workouts and streaks? This cannot be undone.')){data={meta:{startDate:null},sessions:{},settings:{unit:'kg',exUnit:{}},overrides:{},shifts:[]};save();cur=todayStr();render()}}
 
 /* ---------- Nav ---------- */
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;if(tab==='today')cur=todayStr();window.scrollTo(0,0);render()});
